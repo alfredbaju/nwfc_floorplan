@@ -1,0 +1,7 @@
+iniconfig==2.3.0
+mathplot==0.1
+numpy==2.5.1
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.1.1
