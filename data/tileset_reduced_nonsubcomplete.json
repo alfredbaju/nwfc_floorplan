@@ -1,0 +1,214 @@
+{
+  "edge_types": [
+    "W",
+    "D",
+    "O",
+    "C",
+    "W_EXT"
+  ],
+  "room_types": [
+    "BED",
+    "BATH",
+    "KIT",
+    "LIV",
+    "COR",
+    "ENT",
+    "EXT"
+  ],
+  "adjacency_compatibility": {
+    "BED": {
+      "BED": false,
+      "BATH": true,
+      "KIT": false,
+      "LIV": true,
+      "COR": true,
+      "ENT": false
+    },
+    "BATH": {
+      "BED": true,
+      "BATH": false,
+      "KIT": false,
+      "LIV": true,
+      "COR": true,
+      "ENT": false
+    },
+    "KIT": {
+      "BED": false,
+      "BATH": false,
+      "KIT": false,
+      "LIV": true,
+      "COR": true,
+      "ENT": false
+    },
+    "LIV": {
+      "BED": true,
+      "BATH": true,
+      "KIT": true,
+      "LIV": false,
+      "COR": true,
+      "ENT": true
+    },
+    "COR": {
+      "BED": true,
+      "BATH": true,
+      "KIT": true,
+      "LIV": true,
+      "COR": true,
+      "ENT": true
+    },
+    "ENT": {
+      "BED": false,
+      "BATH": false,
+      "KIT": false,
+      "LIV": true,
+      "COR": true,
+      "ENT": false
+    }
+  },
+  "tiles": [
+    {
+      "id": "t01",
+      "room_type": "BED",
+      "e_n": "W",
+      "e_s": "D",
+      "e_w": "W",
+      "e_e": "D",
+      "weight": 1.4
+    },
+    {
+      "id": "t02",
+      "room_type": "BED",
+      "e_n": "D",
+      "e_s": "W",
+      "e_w": "D",
+      "e_e": "W",
+      "weight": 1.4
+    },
+    {
+      "id": "t03",
+      "room_type": "BATH",
+      "e_n": "W",
+      "e_s": "D",
+      "e_w": "D",
+      "e_e": "W",
+      "weight": 1.4
+    },
+    {
+      "id": "t04",
+      "room_type": "BATH",
+      "e_n": "D",
+      "e_s": "W",
+      "e_w": "W",
+      "e_e": "D",
+      "weight": 1.4
+    },
+    {
+      "id": "t05",
+      "room_type": "KIT",
+      "e_n": "W",
+      "e_s": "W",
+      "e_w": "D",
+      "e_e": "D",
+      "weight": 1.4
+    },
+    {
+      "id": "t06",
+      "room_type": "KIT",
+      "e_n": "D",
+      "e_s": "D",
+      "e_w": "W",
+      "e_e": "W",
+      "weight": 1.4
+    },
+    {
+      "id": "t07",
+      "room_type": "LIV",
+      "e_n": "O",
+      "e_s": "O",
+      "e_w": "D",
+      "e_e": "D",
+      "weight": 1.4
+    },
+    {
+      "id": "t08",
+      "room_type": "LIV",
+      "e_n": "D",
+      "e_s": "D",
+      "e_w": "O",
+      "e_e": "O",
+      "weight": 1.4
+    },
+    {
+      "id": "t09",
+      "room_type": "COR",
+      "e_n": "C",
+      "e_s": "C",
+      "e_w": "C",
+      "e_e": "C",
+      "weight": 1.0
+    },
+    {
+      "id": "t10",
+      "room_type": "COR",
+      "e_n": "C",
+      "e_s": "D",
+      "e_w": "C",
+      "e_e": "D",
+      "weight": 1.0
+    },
+    {
+      "id": "t11",
+      "room_type": "COR",
+      "e_n": "D",
+      "e_s": "C",
+      "e_w": "D",
+      "e_e": "C",
+      "weight": 1.0
+    },
+    {
+      "id": "t12",
+      "room_type": "ENT",
+      "e_n": "D",
+      "e_s": "W",
+      "e_w": "W",
+      "e_e": "D",
+      "weight": 1.2
+    },
+    {
+      "id": "t13",
+      "room_type": "EXT",
+      "e_n": "W",
+      "e_s": "W",
+      "e_w": "W",
+      "e_e": "W",
+      "weight": 0.5
+    },
+    {
+      "id": "t14",
+      "room_type": "BED",
+      "e_n": "W",
+      "e_s": "O",
+      "e_w": "W",
+      "e_e": "O",
+      "weight": 1.4
+    },
+    {
+      "id": "t15",
+      "room_type": "LIV",
+      "e_n": "O",
+      "e_s": "W",
+      "e_w": "O",
+      "e_e": "W",
+      "weight": 1.4
+    },
+    {
+      "id": "t16",
+      "room_type": "KIT",
+      "e_n": "D",
+      "e_s": "O",
+      "e_w": "D",
+      "e_e": "O",
+      "weight": 1.4
+    }
+  ]
+}

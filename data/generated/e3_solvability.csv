@@ -1,0 +1,4 @@
+condition,trials,generation_successes,generation_failures,generation_success_rate,mean_exterior_backtracks,functional_solvability_rate,mean_constraint_satisfaction
+"1. Without subcomplete tileset, no Layer 2 (16 tiles)",20,13,7,0.65,4.85,0.3076923076923077,0.36072265595560393
+"2. With subcomplete tileset, no Layer 2 (90 tiles)",20,20,0,1.0,0.0,0.7,0.8319578606072726
+3. With subcomplete tileset + Layer 2 (90 tiles),20,20,0,1.0,0.0,0.45,1.0

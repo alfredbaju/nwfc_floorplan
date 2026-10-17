@@ -1,0 +1,5 @@
+condition,generation_success_rate,functional_solvability_rate,mean_constraint_satisfaction
+"A: Standard WFC, reduced tileset",1.0,0.0,1.0
+"B: Standard WFC, subcomplete tileset",1.0,0.7,1.0
+"C: N-WFC, reduced tileset",0.75,0.0,1.0
+"D: N-WFC, subcomplete tileset",1.0,0.6,1.0

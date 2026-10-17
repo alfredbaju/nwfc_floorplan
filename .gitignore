@@ -1,0 +1,20 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+
+# Generated outputs
+Floor_Plan_*.pdf
+
+# ResPlan dataset (300 MB, CC BY 4.0) - download separately, see data/resplan/README.md
+data/resplan/ResPlan.pkl
+
+# Candidate work lives on the candidate-lookahead branch
+PENDING_CANDIDATE/

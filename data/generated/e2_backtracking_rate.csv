@@ -1,0 +1,6 @@
+grid_size,cells,baseline_restarts_total,baseline_restarts_mean,nwfc_internal_backtracks_total,nwfc_internal_backtracks_mean,nwfc_exterior_backtracks_total,nwfc_exterior_backtracks_mean
+7x7,49,0,0.0,0,0.0,0,0.0
+10x10,100,0,0.0,0,0.0,0,0.0
+16x16,256,0,0.0,0,0.0,0,0.0
+25x25,625,0,0.0,0,0.0,0,0.0
+37x37,1369,0,0.0,0,0.0,0,0.0
