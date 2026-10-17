@@ -1,0 +1,832 @@
+--- shipped/src/zoning.py
++++ candidate/src/zoning.py
+@@ -358,7 +358,13 @@
+                 + liv_count * liv_size + balc_count * balc_size + kit_count * kit_size)
+ 
+     actual_total = actual_A * actual_B
+-    partner_room = "LIV" if liv_count > 0 else ("BALC" if balc_count > 0 else None)
++    # On an upper floor (balcony present) the order of priority is
++    # bedroom and balcony FIRST, then living room, then corridor, per
++    # explicit instruction -- so balcony is the first "partner" that
++    # absorbs excess space and living room only takes what's left (up
++    # to its cap). On the ground floor there's no balcony and living
++    # room is the partner, as before.
++    partner_room = "BALC" if balc_count > 0 else ("LIV" if liv_count > 0 else None)
+     # Living room capped at 30% of the floor on an upper floor
+     # (signaled by balc_count > 0), per explicit instruction: bedroom
+     # and balcony should occupy most of the space, followed by living
+@@ -377,22 +383,30 @@
+         corridor_share = corridor_now / actual_total if actual_total > 0 else 0
+         if corridor_share <= max_corridor_share or corridor_now <= min_buffer:
+             break
+-        bed_can_grow = bed_count > 0 and bed_size < max_single_room_size
++        # The max_single_room_size ceiling exists to keep MANY separated
++        # bedroom/bathroom instances placeable. A floor with only one
++        # or two bedrooms has no such problem, and capping them at the
++        # same ceiling just leaves the space as corridor (verified: an
++        # upper floor with two bedrooms sat at ~23-40% corridor with
++        # bedrooms at 14% of the floor). Allow them to grow further.
++        bed_ceiling = max_single_room_size * (2 if bed_count <= 2 else 1)
++        bed_can_grow = bed_count > 0 and bed_size < bed_ceiling
+         liv_capped_out = liv_cap is not None and liv_size >= liv_cap
+-        if partner_room == "LIV" and liv_capped_out and balc_count > 0:
+-            # Living room has hit its 30% cap -- switch to balcony as
+-            # the excess absorber instead, same multi-instance
+-            # reliability cap as elsewhere (a single balcony instance
+-            # has no such concern and can keep growing; multiple
+-            # instances each need their own separate exterior-wall
+-            # space, verified directly to fail generation entirely
+-            # when grown too large).
+-            partner_room = "BALC"
++        # Balcony is capped at the same reliability ceiling bedroom
++        # uses whenever a living room is also present (verified: a very
++        # large living room AND balcony together strain the tile-level
++        # door-compatibility constraint badly enough to fail generation
++        # almost every time), and always when there are several
++        # balcony instances (each needs its own exterior-wall space).
+         balc_capped_out = (
+-            partner_room == "BALC"
++            balc_count > 0
+             and (balc_count > 1 or liv_count > 0)
+             and balc_size >= max_single_room_size
+         )
++        if partner_room == "BALC" and balc_capped_out and liv_count > 0:
++            # Balcony has reached its ceiling -- living room takes over
++            # as the excess absorber (up to its own 30% cap).
++            partner_room = "LIV"
+         partner_can_grow = (
+             (partner_room == "LIV" and liv_count > 0 and not liv_capped_out)
+             or (partner_room == "BALC" and balc_count > 0 and not balc_capped_out)
+@@ -559,6 +573,50 @@
+     available = set(available_positions)
+     if seed_pos not in available:
+         return None
++
++    # First choice: walk the border RING outward from the seed in both
++    # directions, claiming consecutive free border cells. This keeps
++    # every cell on the building's edge by construction (and lets a
++    # balcony wrap a corner), unlike extending a strip along one side
++    # only, which ran out of room and spilled inward. Verified: only 14
++    # of 30 chosen plans had every balcony cell on the border before
++    # this, and balconies averaged 9.3 of 12 planned cells.
++    if A >= 2 and B >= 2 and (seed_pos[0] in (0, A - 1) or seed_pos[1] in (0, B - 1)):
++        ring = ([(0, c) for c in range(B)]
++                + [(r, B - 1) for r in range(1, A)]
++                + [(A - 1, c) for c in range(B - 2, -1, -1)]
++                + [(r, 0) for r in range(A - 2, 0, -1)])
++        index_of = {p: i for i, p in enumerate(ring)}
++        if seed_pos in index_of:
++            n = len(ring)
++            i0 = index_of[seed_pos]
++            claimed = [seed_pos]
++            taken = {i0}
++            lo, hi = i0, i0
++            lo_open = hi_open = True
++            while len(claimed) < size and (lo_open or hi_open):
++                for direction in (1, -1):
++                    if len(claimed) >= size:
++                        break
++                    if direction == 1 and hi_open:
++                        j = (hi + 1) % n
++                        if j in taken or ring[j] not in available:
++                            hi_open = False
++                        else:
++                            hi = j
++                            taken.add(j)
++                            claimed.append(ring[j])
++                    elif direction == -1 and lo_open:
++                        j = (lo - 1) % n
++                        if j in taken or ring[j] not in available:
++                            lo_open = False
++                        else:
++                            lo = j
++                            taken.add(j)
++                            claimed.append(ring[j])
++            if len(claimed) >= size:
++                return claimed[:size]
++
+     r0, c0 = seed_pos
+     on_top, on_bottom = r0 == 0, r0 == A - 1
+     on_left, on_right = c0 == 0, c0 == B - 1
+@@ -835,6 +893,96 @@
+     return None
+ 
+ 
++def _reserve_kitchen_with_corridor_ring(assignment, A, B, size, rng, avoid_top_left=False,
++                                         min_fraction=0.6, min_aspect=0.5):
++    """Find a clean rectangular kitchen footprint touching the grid
++    border (corners preferred), surrounded by free cells that will
++    become corridor. Returns (kitchen_cells, ring_cells) or None.
++
++    Why a reserved rectangle + ring instead of greedy growth: verified
++    directly that growing the kitchen late into whatever pockets remain
++    produced kitchens truncated to 1-12 cells of a planned 16, wrapped
++    through the gaps between bedroom/bathroom suites, and touching
++    bedrooms/bathrooms in 17 of 20 plans. A rectangle claimed up front,
++    with a corridor ring around it, is a single clean zone, can never
++    touch another room (the ring is corridor), and is connected to the
++    rest of the floor through that corridor -- by construction.
++
++    The planned area is tried first, then nearby areas (slightly
++    larger, then progressively smaller down to min_fraction of the
++    plan) until a placement exists, so the kitchen gets as much space
++    as the geometry genuinely allows rather than silently shrinking.
++    """
++    def free(p):
++        return assignment.get(p, "x") is None
++
++    def rect_cells(r0, c0, h, w):
++        return [(r, c) for r in range(r0, r0 + h) for c in range(c0, c0 + w)]
++
++    def ring_of(cells):
++        cell_set = set(cells)
++        ring = set()
++        for (r, c) in cells:
++            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
++                nb = (r + dr, c + dc)
++                if nb in assignment and nb not in cell_set:
++                    ring.add(nb)
++        return ring
++
++    lo = max(2, int(math.ceil(min_fraction * size)))
++    hi = int(math.floor(1.25 * size))
++    areas = [size]
++    for d in range(1, max(size - lo, hi - size) + 1):
++        if size + d <= hi:
++            areas.append(size + d)
++        if size - d >= lo:
++            areas.append(size - d)
++
++    for area in areas:
++        dims = []
++        for h in range(1, area + 1):
++            if area % h == 0:
++                w = area // h
++                if h <= A and w <= B and min(h, w) / max(h, w) >= min_aspect:
++                    dims.append((h, w))
++        placements = []
++        for (h, w) in dims:
++            for r0 in range(0, A - h + 1):
++                for c0 in range(0, B - w + 1):
++                    sides = (r0 == 0) + (r0 + h == A) + (c0 == 0) + (c0 + w == B)
++                    if sides == 0:
++                        continue
++                    cells = rect_cells(r0, c0, h, w)
++                    if not all(free(p) for p in cells):
++                        continue
++                    ring = ring_of(cells)
++                    # Ring cells must be free (to become corridor) or
++                    # already a stair; anything else would mean the
++                    # kitchen touches another room directly.
++                    if not all(assignment[p] is None or assignment[p] == "STAIR" for p in ring):
++                        continue
++                    corner = sides >= 2
++                    top_left = (r0 == 0 and c0 == 0)
++                    ring_free = [p for p in ring if assignment[p] is None]
++                    # Prefer corners, then smaller rings (less corridor
++                    # consumed), then near-square shapes.
++                    score = (
++                        0 if corner else 1,
++                        1 if (avoid_top_left and top_left) else 0,
++                        len(ring_free),
++                        -min(h, w) / max(h, w),
++                    )
++                    placements.append((score, cells, ring_free))
++        if placements:
++            placements.sort(key=lambda t: t[0])
++            best_key = placements[0][0][:2]
++            # Random choice among equally-good placements for variety.
++            top = [pl for pl in placements if pl[0][:2] == best_key and pl[0][2] <= placements[0][0][2] + 2]
++            _, cells, ring_free = rng.choice(top)
++            return cells, ring_free
++    return None
++
++
+ def plan_subgrid_assignment(A, B, room_counts, seed=None, forced_positions=None,
+                              room_sizes=None, corridor_target=None,
+                              second_entrance_near_kitchen=False, preferred_positions=None):
+@@ -915,6 +1063,7 @@
+     # before.
+     bed_n = room_counts.get("BED", 0)
+     bath_n = room_counts.get("BATH", 0)
++    dense_deferred_baths = 0
+     if bed_n + bath_n >= 6:
+         import dense_placement
+         forced_cells = {pos for positions in (forced_positions or {}).values() for pos in positions}
+@@ -930,20 +1079,101 @@
+                 "this indicates a mismatch between compute_room_sizes_and_grid's sizing and "
+                 "plan_subgrid_assignment's reservation and should not happen in practice."
+             )
++        # Only the PAIRED suites (a bathroom flush against its bedroom)
++        # are reserved up front. Unpaired extra bathrooms (bath count >
++        # bed count) are packed by dense_placement as free-standing
++        # units in the middle of the open area -- verified to sit
++        # exactly where the kitchen rectangle and its corridor ring
++        # need to go, making the kitchen reservation fail silently and
++        # the kitchen fall back to a blob touching bathrooms. They're
++        # left to be placed after the kitchen has its space.
++        dense_bed_cells = {cell for fp in bed_fps for cell in fp}
++
++        def _touches_dense_bed(fp):
++            return any((r + dr, c + dc) in dense_bed_cells
++                       for (r, c) in fp for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)))
++
++        paired_bath_fps = [fp for fp in bath_fps if _touches_dense_bed(fp)]
++        unpaired_baths = len(bath_fps) - len(paired_bath_fps)
+         for fp in bed_fps:
+             for cell in fp:
+                 assignment[cell] = "BED"
+-        for fp in bath_fps:
++        for fp in paired_bath_fps:
+             for cell in fp:
+                 assignment[cell] = "BATH"
+         room_counts["BED"] = 0
+-        room_counts["BATH"] = 0
++        room_counts["BATH"] = unpaired_baths
++        dense_deferred_baths = unpaired_baths
+ 
+     placed_by_type = {}
+     used_bedrooms_for_bath = set()
+     used_preferred_bath = set()
+     reserved_entrance_slot = None
+ 
++    # --- Step 0.5: reserve the kitchen as a clean rectangle in a corner
++    # with a corridor ring around it, BEFORE entrance/living/spine.
++    # Makes "single clean zone, never adjacent to bedroom/bathroom/
++    # living room, connected via corridor" true by construction (see
++    # _reserve_kitchen_with_corridor_ring). The living room's entrance
++    # is then steered to the far side so the two end up opposite.
++    kitchen_reserved = False
++    kitchen_ring = set()
++    kitchen_centroid = None
++    if room_counts.get("KIT", 0) > 0:
++        suites_pending = room_counts.get("BED", 0) > 0
++        reserved = _reserve_kitchen_with_corridor_ring(
++            assignment, A, B, sizes.get("KIT", 2), rng, avoid_top_left=suites_pending,
++        )
++        if reserved is not None:
++            kit_cells_res, kitchen_ring = reserved
++            for pos in kit_cells_res:
++                assignment[pos] = "KIT"
++            for pos in kitchen_ring:
++                assignment[pos] = "CORRIDOR"
++            placed_by_type.setdefault("KIT", []).append(kit_cells_res[0])
++            room_counts["KIT"] -= 1
++            kitchen_reserved = True
++            kitchen_centroid = (
++                sum(r for r, c in kit_cells_res) / len(kit_cells_res),
++                sum(c for r, c in kit_cells_res) / len(kit_cells_res),
++            )
++
++    # --- Step 0.6: place the deferred EXTRA bathrooms (bath count >
++    # bed count) deliberately, flush against a bedroom and separated
++    # from every other bathroom. Left to the generic loop (after the
++    # kitchen and living room had claimed their space) they ran out of
++    # separated room and fell back to touching an existing bathroom,
++    # merging into it -- verified: bathroom totals came out 6 instead
++    # of 7. A bathroom next to a bedroom is also what the layout rules
++    # require for every bathroom, not just the paired ones.
++    if dense_deferred_baths > 0:
++        bath_sz = sizes.get("BATH", 1)
++
++        def _n4(pos):
++            return [(pos[0] + da, pos[1] + db) for da, db in ((-1, 0), (1, 0), (0, -1), (0, 1))]
++
++        for _ in range(dense_deferred_baths):
++            bath_cells_now = {p for p, t in assignment.items() if t == "BATH"}
++            bed_cells_now = {p for p, t in assignment.items() if t == "BED"}
++            too_close = {(r + dr, c + dc) for (r, c) in bath_cells_now
++                         for dr in range(-2, 3) for dc in range(-2, 3) if abs(dr) + abs(dc) <= 2}
++            free_now = [p for p in all_positions if assignment[p] is None and p not in too_close]
++            free_set = set(free_now)
++            seeds = [p for p in free_now if any(nb in bed_cells_now for nb in _n4(p))]
++            rng.shuffle(seeds)
++            placed_fp = None
++            for seed_cell in seeds[:40]:
++                fp = _claim_footprint_regular(seed_cell, bath_sz, free_now, rng)
++                if fp and len(fp) >= bath_sz and all(c in free_set for c in fp):
++                    placed_fp = fp
++                    break
++            if placed_fp is None:
++                break  # fall through: the normal loop still tries to place it
++            for pos in placed_fp:
++                assignment[pos] = "BATH"
++            placed_by_type.setdefault("BATH", []).append(placed_fp[0])
++            room_counts["BATH"] -= 1
++
+     # --- Step 1+2: entrance position + living room seeded as its direct
+     # neighbor, guaranteeing adjacency by construction. Try every
+     # available border position (not just one) until a workable
+@@ -951,6 +1181,12 @@
+     if room_counts.get("LIV", 0) > 0:
+         border_free = [p for p in all_positions if assignment[p] is None and is_border(p)]
+         rng.shuffle(border_free)
++        if kitchen_centroid is not None:
++            # Far side from the kitchen first (with a little jitter so
++            # layouts still vary), putting living room and kitchen at
++            # opposite ends of the floor.
++            border_free.sort(key=lambda p: -(math.hypot(p[0] - kitchen_centroid[0], p[1] - kitchen_centroid[1])
++                                              + rng.uniform(0, 1.5)))
+         for candidate_entrance in border_free:
+             a, b = candidate_entrance
+             neighbor_candidates = [
+@@ -1055,6 +1291,44 @@
+         # as it always has, so this is a pure best-effort improvement,
+         # never a new way to fail.
+ 
++    # --- Step 2.8: reserve balconies on the building's edge BEFORE the
++    # corridor spine absorbs the free cells. By the time balconies were
++    # placed in the normal room loop, the spine had already taken most
++    # border cells, so balconies were squeezed into leftover pockets:
++    # verified 15 of 30 chosen plans had every balcony cell on the
++    # border, and balconies averaged 9.1 of 12 planned cells. Seeds are
++    # preferred next to a bedroom or living room (the only room types a
++    # balcony may have a door to, besides corridor), and a one-cell gap
++    # keeps separate balconies from merging into one.
++    balc_to_reserve = room_counts.get("BALC", 0)
++    if balc_to_reserve > 0:
++        balc_size_here = sizes.get("BALC", 1)
++
++        def _neighbors4(pos):
++            return [(pos[0] + da, pos[1] + db) for da, db in ((-1, 0), (1, 0), (0, -1), (0, 1))]
++
++        for _ in range(balc_to_reserve):
++            existing_balc = {p for p, t in assignment.items() if t == "BALC"}
++            halo = {nb for p in existing_balc for nb in _neighbors4(p)}
++            free_cells = {p for p in all_positions if assignment[p] is None and p not in halo}
++            partners = {p for p, t in assignment.items() if t in ("LIV", "BED")}
++            free_border = [p for p in free_cells if is_border(p)]
++            preferred = [p for p in free_border if any(nb in partners for nb in _neighbors4(p))]
++            rng.shuffle(preferred)
++            rng.shuffle(free_border)
++            placed_fp = None
++            for seed_cell in (preferred + [p for p in free_border if p not in set(preferred)])[:60]:
++                fp = _claim_border_strip_footprint(seed_cell, balc_size_here, free_cells, A, B)
++                if fp and len(fp) >= balc_size_here:
++                    placed_fp = fp
++                    break
++            if placed_fp is None:
++                break  # leave any remaining balconies to the normal room loop
++            for pos in placed_fp:
++                assignment[pos] = "BALC"
++            placed_by_type.setdefault("BALC", []).append(placed_fp[0])
++            room_counts["BALC"] -= 1
++
+     # --- Step 3: grow the corridor spine from the grid center (reliable,
+     # maximum open space to grow into -- seeding it AT the entrance
+     # instead, right next to the now-large living room, was tried first
+@@ -1098,6 +1372,22 @@
+                     assignment[pos] = "CORRIDOR"
+                     spine.add(pos)
+ 
++    if kitchen_ring and spine:
++        ring_touches_spine = any(
++            (r + dr, c + dc) in spine for (r, c) in kitchen_ring for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))
++        )
++        if not ring_touches_spine:
++            claimed_now = {p for p in all_positions if assignment[p] is not None}
++            best_path = None
++            for ring_cell in kitchen_ring:
++                path = _bridge_to_region(A, B, ring_cell, spine, claimed_now - {ring_cell})
++                if path is not None and (best_path is None or len(path) < len(best_path)):
++                    best_path = path
++            if best_path:
++                for pos in best_path:
++                    assignment[pos] = "CORRIDOR"
++                    spine.add(pos)
++
+     def is_spine_adjacent(pos):
+         a, b = pos
+         return any((a + da, b + db) in spine for da, db in ((-1, 0), (1, 0), (0, -1), (0, 1)))
+@@ -1478,7 +1768,7 @@
+     # adjacent to KIT into a second CORRIDOR_ENTRANCE, mirroring the
+     # entrance+LIV construction above but for KIT instead.
+     second_entrance_slot = None
+-    if second_entrance_near_kitchen and room_counts.get("KIT", 0) > 0:
++    if second_entrance_near_kitchen and (room_counts.get("KIT", 0) > 0 or kitchen_reserved):
+         kit_cells = {p for p, rt in assignment.items() if rt == "KIT"}
+         # Carve the entrance directly out of one of kitchen's own
+         # border-facing cells FIRST -- this guarantees cell-level
+@@ -1963,6 +2253,291 @@
+     return counts
+ 
+ 
++def _macro_components(cells):
++    """4-connected components of a set of (row, col) macro cells."""
++    remaining = set(cells)
++    comps = []
++    while remaining:
++        start = remaining.pop()
++        comp = {start}
++        stack = [start]
++        while stack:
++            r, c = stack.pop()
++            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
++                nb = (r + dr, c + dc)
++                if nb in remaining:
++                    remaining.remove(nb)
++                    comp.add(nb)
++                    stack.append(nb)
++        comps.append(comp)
++    return comps
++
++
++def score_macro_plan(plan, A, B, room_counts, room_sizes, target_corridor_share=0.10,
++                     max_liv_share_with_balcony=0.30, compat=None):
++    """Score a macro room plan against the layout rules. LOWER IS BETTER.
++
++    The greedy planner places rooms one at a time and silently accepts
++    whatever it ends up with -- verified directly: a kitchen planned at
++    16 cells came out at 12, 12 and 1 cell across three seeds, and
++    kitchens regularly wrapped through the gaps between bedroom/bathroom
++    suites, touching them. Generating many cheap candidates and scoring
++    them against the actual rules is far more dependable than hoping the
++    greedy placement lands on a good arrangement.
++    """
++    cells_by_type = {}
++    for pos, rt in plan.items():
++        cells_by_type.setdefault(rt, set()).add(pos)
++
++    def nbrs(p):
++        r, c = p
++        return ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1))
++
++    total_cells = A * B
++    penalty = 0.0
++
++    # 1. Fulfilment: rooms must actually receive the space they were
++    #    sized for (a truncated kitchen/bedroom is the single worst
++    #    outcome -- the leftover space silently becomes corridor).
++    for rt in ("BED", "BATH", "KIT", "LIV", "BALC"):
++        want_each = room_sizes.get(rt, 1)
++        count = room_counts.get(rt, 0)
++        if count <= 0:
++            continue
++        comps = _macro_components(cells_by_type.get(rt, set()))
++        got_total = sum(len(c) for c in comps)
++        penalty += 6.0 * max(0, count * want_each - got_total)
++        # Two rooms of the same type touching merge into one at the
++        # tile level and break the exact count (verified: bathroom total
++        # came out 6 instead of 7), so a merged pair is heavily penalised.
++        penalty += 40.0 * max(0, count - len(comps))
++        if rt in ("BED", "KIT", "BALC"):
++            for comp in comps:
++                floor_size = 0.8 * want_each
++                if len(comp) < floor_size:
++                    penalty += 6.0 * (floor_size - len(comp))
++
++    # 2. Kitchen: a single clean zone, on the border, never touching
++    #    bedrooms/bathrooms (or living room), ideally in a corner and
++    #    far from the living room.
++    kit = cells_by_type.get("KIT", set())
++    if kit:
++        bed_bath = cells_by_type.get("BED", set()) | cells_by_type.get("BATH", set())
++        liv = cells_by_type.get("LIV", set())
++        contacts_bb = sum(1 for p in kit for nb in nbrs(p) if nb in bed_bath)
++        contacts_liv = sum(1 for p in kit for nb in nbrs(p) if nb in liv)
++        penalty += 8.0 * contacts_bb + 3.0 * contacts_liv
++        rows_ = [r for r, c in kit]
++        cols_ = [c for r, c in kit]
++        bbox = (max(rows_) - min(rows_) + 1) * (max(cols_) - min(cols_) + 1)
++        penalty += 12.0 * (1.0 - len(kit) / bbox)
++        penalty += 15.0 * max(0, len(_macro_components(kit)) - 1)
++        on_border = lambda p: p[0] in (0, A - 1) or p[1] in (0, B - 1)
++        if not any(on_border(p) for p in kit):
++            penalty += 30.0
++        if not any((p[0] in (0, A - 1)) and (p[1] in (0, B - 1)) for p in kit):
++            penalty += 3.0
++        if liv:
++            kr = sum(rows_) / len(kit)
++            kc = sum(cols_) / len(kit)
++            lr = sum(r for r, c in liv) / len(liv)
++            lc = sum(c for r, c in liv) / len(liv)
++            penalty += 4.0 * (1.0 - math.hypot(kr - lr, kc - lc) / math.hypot(A, B))
++
++    # 3. Every bathroom must sit against a bedroom (ensuite) whenever
++    #    there are enough bedrooms to go around.
++    if 0 < room_counts.get("BATH", 0) <= room_counts.get("BED", 0):
++        bed = cells_by_type.get("BED", set())
++        for comp in _macro_components(cells_by_type.get("BATH", set())):
++            if not any(nb in bed for p in comp for nb in nbrs(p)):
++                penalty += 20.0
++
++    # 4. Balconies belong on the exterior edge.
++    for p in cells_by_type.get("BALC", set()):
++        depth = min(p[0], A - 1 - p[0], p[1], B - 1 - p[1])
++        if depth > 0:
++            penalty += 4.0 * depth
++
++    # 5. Living room share cap on floors with balconies (upper floors).
++    if room_counts.get("BALC", 0) > 0:
++        liv_n = len(cells_by_type.get("LIV", set()))
++        cap = max_liv_share_with_balcony * total_cells
++        if liv_n > cap:
++            penalty += 4.0 * (liv_n - cap)
++
++    # 6. Corridor share close to target, and corridor must be one
++    #    connected network.
++    corridor = cells_by_type.get("CORRIDOR", set()) | cells_by_type.get("CORRIDOR_ENTRANCE", set())
++    penalty += 25.0 * abs(len(corridor) / total_cells - target_corridor_share)
++    penalty += 10.0 * max(0, len(_macro_components(corridor)) - 1)
++
++    # 7. Bedrooms should be reasonably proportioned.
++    for comp in _macro_components(cells_by_type.get("BED", set())):
++        rows_ = [r for r, c in comp]
++        cols_ = [c for r, c in comp]
++        h = max(rows_) - min(rows_) + 1
++        w = max(cols_) - min(cols_) + 1
++        ar = min(h, w) / max(h, w)
++        if ar < 0.5:
++            penalty += 12.0 * (0.5 - ar)
++
++    # 9. Seams between room types that are not allowed to share a door
++    #    (per the tileset's layer-2 matrix). VERIFIED to predict
++    #    tile-level failure: the exterior solver picks door edges
++    #    freely toward not-yet-generated neighbours, and when that
++    #    neighbour's type can't take a door it dead-ends and
++    #    backtracks. Balcony floors with 6+ such seams solved 0 of 8
++    #    times; with 3 or fewer, about 2 of 3. Balcony and stair are
++    #    the pickiest types, so this also keeps a balcony against
++    #    bedroom/living/corridor and a stair against corridor/living.
++    if compat is not None:
++        short = {"CORRIDOR": "COR", "CORRIDOR_ENTRANCE": "ENT"}
++        incompatible_seams = 0
++        for (r, c), rt in plan.items():
++            for dr, dc in ((1, 0), (0, 1)):
++                other = plan.get((r + dr, c + dc))
++                if other is None:
++                    continue
++                a, b = short.get(rt, rt), short.get(other, other)
++                if a != b and not (compat(a, b) and compat(b, a)):
++                    incompatible_seams += 1
++        penalty += 10.0 * incompatible_seams
++
++    # 8. Every bedroom and the kitchen should touch the corridor
++    #    network (that's how they connect to the rest of the floor).
++    for rt in ("BED", "KIT"):
++        for comp in _macro_components(cells_by_type.get(rt, set())):
++            if not any(nb in corridor for p in comp for nb in nbrs(p)):
++                penalty += 6.0
++
++    return penalty
++
++
++_ADAPTED_SIZE_CACHE = {}
++
++
++def _plan_shortfalls(plan, room_counts, sizes):
++    """{room_type: cells missing} for rooms that didn't receive the
++    space they were planned for."""
++    cells = {}
++    for pos, rt in plan.items():
++        cells[rt] = cells.get(rt, 0) + 1
++    out = {}
++    for rt in ("BED", "BATH", "KIT", "LIV", "BALC"):
++        count = room_counts.get(rt, 0)
++        if count <= 0:
++            continue
++        missing = count * sizes.get(rt, 1) - cells.get(rt, 0)
++        if missing > 0:
++            out[rt] = missing
++    return out
++
++
++def _adapt_sizes_to_fit(A, B, room_counts, sizes, kwargs, probe_seeds=16, max_rounds=14,
++                        min_bed_size=6, min_fraction=0.5):
++    """Shrink the flexible rooms' planned sizes until the planner can
++    actually deliver them in this grid.
++
++    The sizing formulas work from area percentages, but real placement
++    also needs space for bedroom/bathroom suites' unavoidable gaps, the
++    kitchen's corridor ring and the connecting corridor. Verified
++    directly: kitchen 16 + living 17 planned for a floor whose free
++    space (after three suites, ring and connecting corridor) holds
++    about half of that -- so the living room was silently truncated to
++    ~6 cells and the leftover became corridor. Probing the planner and
++    trimming only what doesn't fit keeps every room at a size it can
++    genuinely receive.
++    """
++    original = dict(sizes)
++    cur = dict(sizes)
++    for _ in range(max_rounds):
++        shortfall_runs = []
++        for i in range(probe_seeds):
++            try:
++                plan = plan_subgrid_assignment(A, B, room_counts, seed=1234567 + i * 7919,
++                                               **{**kwargs, "room_sizes": cur})
++            except ValueError:
++                continue
++            shortfall_runs.append(_plan_shortfalls(plan, room_counts, cur))
++        if shortfall_runs and any(not sf for sf in shortfall_runs):
++            return cur
++        if not shortfall_runs:
++            agg = {rt: 1 for rt in ("KIT", "LIV", "BALC", "BED")}
++        else:
++            agg = {}
++            for rt in ("BED", "BATH", "KIT", "LIV", "BALC"):
++                vals = sorted(sf.get(rt, 0) for sf in shortfall_runs)
++                agg[rt] = vals[len(vals) // 2]
++        changed = False
++        for rt in ("KIT", "LIV", "BALC"):
++            if agg.get(rt, 0) > 0 and room_counts.get(rt, 0) > 0:
++                floor_size = max(1, int(math.ceil(min_fraction * original.get(rt, 1))))
++                new_size = max(floor_size, cur[rt] - max(1, int(round(0.12 * cur[rt]))))
++                if new_size < cur[rt]:
++                    cur[rt] = new_size
++                    changed = True
++        # Keep the user's kitchen/living rule while adapting: kitchen
++        # and living room about the same size, living slightly larger.
++        # Kitchen is reserved first (so it nearly always gets its full
++        # size) which means only the living room tends to come up
++        # short -- without this, adapting alone would leave the
++        # kitchen much LARGER than the living room.
++        if room_counts.get("KIT", 0) > 0 and room_counts.get("LIV", 0) > 0:
++            max_kit = max(1, int(round(cur["LIV"] / 1.1)))
++            if cur["KIT"] > max_kit:
++                cur["KIT"] = max_kit
++                changed = True
++        if (agg.get("BED", 0) > 0 or agg.get("BATH", 0) > 0) and room_counts.get("BED", 0) > 0:
++            new_bed = max(min_bed_size, cur.get("BED", 6) - 1)
++            if new_bed < cur.get("BED", 6):
++                cur["BED"] = new_bed
++                cur["BATH"] = max(1, int(math.floor(new_bed * 0.40)))
++                changed = True
++        if not changed:
++            break
++    return cur
++
++
++def plan_subgrid_assignment_best(A, B, room_counts, seed=None, n_candidates=40, **kwargs):
++    """Generate several macro plans from derived seeds and return the
++    best-scoring one (see score_macro_plan). Macro planning is cheap
++    (a few ms per plan), so searching dozens of candidates costs far
++    less than a single tile-level WFC solve, and it means the rules
++    are checked against real outcomes instead of assumed.
++
++    Planned sizes are first adapted (once, then cached) so every room
++    is sized for space the planner can really give it.
++    """
++    compat = kwargs.pop("compat", None)
++    base = seed if seed is not None else random.randint(0, 10_000_000)
++    given_sizes = dict(kwargs.get("room_sizes") or ROOM_SIZE_SUBGRIDS)
++    forced_key = tuple(sorted((k, tuple(v)) for k, v in (kwargs.get("forced_positions") or {}).items()))
++    cache_key = (A, B, tuple(sorted(room_counts.items())), tuple(sorted(given_sizes.items())), forced_key,
++                 bool(kwargs.get("second_entrance_near_kitchen")))
++    sizes = _ADAPTED_SIZE_CACHE.get(cache_key)
++    if sizes is None:
++        sizes = _adapt_sizes_to_fit(A, B, room_counts, given_sizes, kwargs)
++        _ADAPTED_SIZE_CACHE[cache_key] = sizes
++    kwargs = {**kwargs, "room_sizes": sizes}
++    corridor_target = kwargs.get("corridor_target")
++    target_share = (corridor_target / (A * B)) if corridor_target else 0.10
++    best, best_score, last_err = None, None, None
++    for i in range(n_candidates):
++        s = (base * 1000003 + i * 7919) % 2_147_483_647
++        try:
++            plan = plan_subgrid_assignment(A, B, room_counts, seed=s, **kwargs)
++        except ValueError as e:
++            last_err = e
++            continue
++        sc = score_macro_plan(plan, A, B, room_counts, sizes, target_corridor_share=max(0.10, target_share),
++                              compat=compat)
++        if best is None or sc < best_score:
++            best, best_score = plan, sc
++    if best is None:
++        raise last_err if last_err else ValueError("No feasible macro plan found")
++    return best
++
++
+ def solve_zoned_with_exact_counts(tileset, A, B, C, room_counts, max_attempts=30,
+                                    enforce_layer2=True, context_scorer=None,
+                                    max_exterior_backtracks=50, forced_positions=None,
+@@ -2009,7 +2584,8 @@
+     for attempt in range(max_attempts):
+         attempt_seed = _random.randint(0, 10_000_000)
+         try:
+-            plan = plan_subgrid_assignment(A, B, room_counts, seed=attempt_seed, forced_positions=forced_positions,
++            plan = plan_subgrid_assignment_best(A, B, room_counts, seed=attempt_seed, forced_positions=forced_positions,
++                                            compat=tileset.is_room_compatible,
+                                             room_sizes=room_sizes, corridor_target=corridor_target,
+                                             second_entrance_near_kitchen=second_entrance_near_kitchen,
+                                             preferred_positions=preferred_positions)
+@@ -2114,8 +2690,9 @@
+         for _ in range(3):
+             attempt_seed = _random.randint(0, 10_000_000)
+             try:
+-                plan = plan_subgrid_assignment(
++                plan = plan_subgrid_assignment_best(
+                     A, B, room_counts, seed=attempt_seed, forced_positions=forced_positions,
++                    compat=tileset.is_room_compatible,
+                     room_sizes=room_sizes, corridor_target=corridor_target,
+                     second_entrance_near_kitchen=second_entrance_near_kitchen,
+                     preferred_positions=preferred_positions,
+--- shipped/src/nwfc.py
++++ candidate/src/nwfc.py
+@@ -140,7 +140,7 @@
+     return False
+ 
+ 
+-def solve_i_wfc(tileset, C, top_row_tiles, left_col_tiles, boundary_sides, backtrack_budget=20000, enforce_layer2=False, context_scorer=None, candidate_tile_ids=None):
++def solve_i_wfc(tileset, C, top_row_tiles, left_col_tiles, boundary_sides, backtrack_budget=20000, enforce_layer2=False, context_scorer=None, candidate_tile_ids=None, south_neighbor_types=None, east_neighbor_types=None):
+     """Solve one C x C subgrid (I-WFC), inheriting fixed edges from
+     already-generated neighbors, using real backtracking search.
+ 
+@@ -159,7 +159,8 @@
+     within the backtracking budget -- the "I-WFC may fail to find a
+     suitable tile" case the base paper describes in Section III-C6.
+     """
+-    grid = WFCGrid(rows=C, cols=C, tileset=tileset, boundary_sides=boundary_sides, enforce_layer2=enforce_layer2, context_scorer=context_scorer, candidate_tile_ids=candidate_tile_ids)
++    grid = WFCGrid(rows=C, cols=C, tileset=tileset, boundary_sides=boundary_sides, enforce_layer2=enforce_layer2, context_scorer=context_scorer, candidate_tile_ids=candidate_tile_ids,
++                   south_neighbor_types=south_neighbor_types, east_neighbor_types=east_neighbor_types)
+ 
+     pinned = []
+     if top_row_tiles is not None:
+@@ -191,6 +192,18 @@
+     return grid.as_tile_ids(), backtrack_events[0]
+ 
+ 
++def _tile_room_types_for_assignment(assigned_room_type):
++    """Tile room types a subgrid with this planned assignment may use
++    (None when unplanned/unrestricted, meaning "don't constrain")."""
++    if assigned_room_type is None:
++        return None
++    if assigned_room_type == "CORRIDOR":
++        return {"COR"}
++    if assigned_room_type == "CORRIDOR_ENTRANCE":
++        return {"COR", "ENT"}
++    return {assigned_room_type}
++
++
+ def _candidate_ids_for_subgrid(tileset, assigned_room_type):
+     """Given a subgrid's assignment from a room_plan (a specific room
+     type, "CORRIDOR" for connective/unrestricted tissue, or None for no
+@@ -304,14 +317,19 @@
+             boundary_sides.add("e")
+ 
+         candidate_tile_ids = None
++        south_types = east_types = None
+         if room_plan is not None:
+             candidate_tile_ids = _candidate_ids_for_subgrid(tileset, room_plan.get((a, b)))
++            if enforce_layer2:
++                south_types = _tile_room_types_for_assignment(room_plan.get((a + 1, b)))
++                east_types = _tile_room_types_for_assignment(room_plan.get((a, b + 1)))
+ 
+         try:
+             tile_grid, used_restarts = solve_i_wfc(
+                 tileset, C, top_row_tiles, left_col_tiles, boundary_sides, backtrack_budget_per_subgrid,
+                 enforce_layer2=enforce_layer2, context_scorer=context_scorer,
+                 candidate_tile_ids=candidate_tile_ids,
++                south_neighbor_types=south_types, east_neighbor_types=east_types,
+             )
+             subgrids[(a, b)] = tile_grid
+             restarts[(a, b)] = used_restarts
+--- shipped/src/wfc_core.py
++++ candidate/src/wfc_core.py
+@@ -54,6 +54,8 @@
+         enforce_layer2=False,
+         context_scorer=None,
+         candidate_tile_ids=None,
++        south_neighbor_types=None,
++        east_neighbor_types=None,
+     ):
+         """boundary_sides controls which of the grid's four outer sides get
+         the wall-only perimeter constraint applied. The baseline (single
+@@ -91,6 +93,16 @@
+         self.boundary_edges = set(boundary_edges)
+         self.boundary_sides = set(boundary_sides)
+         self.enforce_layer2 = enforce_layer2
++        # Optional: room types planned for the not-yet-generated subgrids
++        # that this grid's last row / last column will be shared with.
++        # When given (with enforce_layer2), tiles in that shared row/col
++        # are not allowed a DOOR facing a neighbour whose type can't
++        # legally take one -- otherwise the neighbour's solve starts from
++        # a contradictory pinned edge and the exterior solver has to
++        # backtrack (verified to be the dominant cause of floor
++        # generation failures under layer-2 rules).
++        self.south_neighbor_types = frozenset(south_neighbor_types) if south_neighbor_types else None
++        self.east_neighbor_types = frozenset(east_neighbor_types) if east_neighbor_types else None
+         self.context_scorer = context_scorer
+         if candidate_tile_ids is not None:
+             self._all_ids = frozenset(candidate_tile_ids)
+@@ -129,8 +141,21 @@
+                         to_remove.add(tid)
+                     if c == self.cols - 1 and "e" in self.boundary_sides and tile.e_e not in self.boundary_edges:
+                         to_remove.add(tid)
++                    if self.enforce_layer2:
++                        if (r == self.rows - 1 and self.south_neighbor_types and tile.e_s == "D"
++                                and not self._door_ok(tile.room_type, self.south_neighbor_types)):
++                            to_remove.add(tid)
++                        if (c == self.cols - 1 and self.east_neighbor_types and tile.e_e == "D"
++                                and not self._door_ok(tile.room_type, self.east_neighbor_types)):
++                            to_remove.add(tid)
+                 candidates -= to_remove
+ 
++    def _door_ok(self, room_type, neighbor_types):
++        """A door from `room_type` is only safe if EVERY room type the
++        neighbouring subgrid might use can legally share one."""
++        is_ok = self.tileset.is_room_compatible
++        return all(is_ok(room_type, nt) and is_ok(nt, room_type) for nt in neighbor_types)
++
+     def pin(self, r, c, tile_id):
+         """Force cell (r, c) to a specific tile id, bypassing entropy
+         selection/random collapse. Used by I-WFC to inherit a fixed
